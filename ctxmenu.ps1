@@ -520,6 +520,7 @@ $form.Controls.Add($toolbar)
 
 # ── Populate list ──
 function populateList {
+    $script:loading = $true
     $lv.BeginUpdate()
     $lv.Items.Clear()
 
@@ -534,8 +535,8 @@ function populateList {
         $imgIdx = getIconIndex $e $script:imageList
 
         $item = New-Object System.Windows.Forms.ListViewItem($e.Label, $imgIdx)
+        $item.Tag     = $e          # must be set before Checked (ItemCheck fires on set)
         $item.Checked = $e.Enabled
-        $item.Tag     = $e
 
         [void]$item.SubItems.Add($e.AppliesTo)
         [void]$item.SubItems.Add($e.Kind)
@@ -551,6 +552,7 @@ function populateList {
     }
 
     $lv.EndUpdate()
+    $script:loading = $false
     $lblStatus.Text = "$shown shown  |  $disabled disabled  |  $($script:entries.Count) total"
 }
 
@@ -567,8 +569,10 @@ function reloadEntries {
 # ── Events ────────────────────────────────────────────────────────────────────
 $lv.add_ItemCheck({
     param($s, $e)
+    if ($script:loading) { return }
     $item  = $lv.Items[$e.Index]
     $entry = [CmEntry]$item.Tag
+    if (-not $entry) { return }
     $on    = ($e.NewValue -eq 'Checked')
     applyEntry $entry $on
     $entry.Enabled         = $on
