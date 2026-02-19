@@ -1,84 +1,108 @@
-# ctxmenu.ps1 - Windows Explorer context menu manager
+# ctxmenu.ps1  –  Context Menu Manager
 #
-# Shows shell verbs and COM extension handlers from the registry.
-# Toggle entries on/off using HKCU shadow keys - no admin rights needed,
-# because Windows merges HKCU on top of HKLM when building HKCR.
+# Renders a visual preview of your context menu (dark theme, icons, submenu arrows)
+# and lets you click items to hide/show them in Windows Explorer.
 #
-# Disable mechanisms:
-#   Static verbs   - add LegacyDisable (REG_SZ, empty) to the verb key
-#   COM handlers   - prefix the CLSID value with '-' in the handler key
+# All writes go to HKCU, so no admin rights needed.
+#   Static verbs:  LegacyDisable value in HKCU shadow key
+#   COM handlers:  prefix CLSID with '-' in HKCU shadow key
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
-# ── Logging ───────────────────────────────────────────────────────────────────
-$script:logPath = Join-Path $PSScriptRoot 'ctxmenu.log'
-function log([string]$msg) {
-    $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff')  $msg"
-    Add-Content -Path $script:logPath -Value $line -Encoding UTF8
-}
-function logEx([System.Exception]$ex, [string]$context) {
-    log "ERROR in $context`: $($ex.Message)"
-    log "  Type: $($ex.GetType().FullName)"
-    log "  Stack: $($ex.StackTrace -replace '\r?\n', ' | ')"
-    if ($ex.InnerException) { logEx $ex.InnerException "  (inner)" }
-}
-
-# Clear log on each startup so it only has the latest run
-Set-Content -Path $script:logPath -Value "ctxmenu started $(Get-Date)" -Encoding UTF8
-
-# Catch unhandled WinForms thread exceptions and log them before showing the dialog
-[System.Windows.Forms.Application]::add_ThreadException({
-    param($sender, $e)
-    logEx $e.Exception 'ThreadException'
-})
-
-Add-Type -ReferencedAssemblies 'System.Drawing' @'
+Add-Type -ReferencedAssemblies 'System.Windows.Forms','System.Drawing' @'
 using System;
 using System.Drawing;
+using System.Windows.Forms;
 using System.Runtime.InteropServices;
 
 public class CmEntry {
-    public string VerbName;     // registry key name
-    public string Label;        // friendly display name
-    public string AppliesTo;    // "All Files", "Folders", "Video Files", etc.
-    public string Source;       // "HKCU" or "HKLM"
-    public string Kind;         // "Verb", "Submenu", or "ShellEx"
-    public string ReadPath;     // full HKEY_xxx\... path for reading
-    public string ShadowPath;   // HKCU subkey path to write disable value
+    public string VerbName;
+    public string Label;
+    public string AppliesTo;
+    public string Source;
+    public string Kind;
+    public string ReadPath;
+    public string ShadowPath;
     public bool   Enabled;
     public bool   IsSubmenu;
-    public string ClsId;        // ShellEx only - clean {GUID} without leading -
+    public string ClsId;
 }
 
 public class IconUtil {
-    [DllImport("shell32.dll", CharSet = CharSet.Auto)]
-    private static extern int ExtractIconEx(
-        string lpszFile, int nIconIndex,
-        IntPtr[] phiconLarge, IntPtr[] phiconSmall, int nIcons);
-
+    [DllImport("shell32.dll", CharSet=CharSet.Auto)]
+    private static extern int ExtractIconEx(string f,int i,IntPtr[] l,IntPtr[] s,int n);
     [DllImport("user32.dll")]
-    private static extern bool DestroyIcon(IntPtr hIcon);
-
-    public static Icon GetSmall(string file, int index) {
+    private static extern bool DestroyIcon(IntPtr h);
+    public static Icon GetSmall(string file, int idx) {
         try {
-            var large = new IntPtr[1];
-            var small = new IntPtr[1];
-            if (ExtractIconEx(file, index, large, small, 1) == 0) return null;
-            if (large[0] != IntPtr.Zero) DestroyIcon(large[0]);
-            if (small[0] == IntPtr.Zero) return null;
-            var icon = (Icon)Icon.FromHandle(small[0]).Clone();
-            DestroyIcon(small[0]);
+            var l=new IntPtr[1]; var s=new IntPtr[1];
+            if(ExtractIconEx(file,idx,l,s,1)==0) return null;
+            if(l[0]!=IntPtr.Zero) DestroyIcon(l[0]);
+            if(s[0]==IntPtr.Zero) return null;
+            var icon=(Icon)Icon.FromHandle(s[0]).Clone();
+            DestroyIcon(s[0]);
             return icon;
         } catch { return null; }
     }
 }
+
+public class MuiUtil {
+    [DllImport("shlwapi.dll", CharSet=CharSet.Unicode)]
+    private static extern int SHLoadIndirectString(string src, System.Text.StringBuilder buf, int len, IntPtr reserved);
+
+    public static string Resolve(string s) {
+        if (string.IsNullOrEmpty(s) || !s.StartsWith("@")) return s;
+        var buf = new System.Text.StringBuilder(512);
+        int hr = SHLoadIndirectString(s, buf, buf.Capacity, IntPtr.Zero);
+        return (hr == 0 && buf.Length > 0) ? buf.ToString() : s;
+    }
+}
+
+// Double-buffered panel - eliminates ALL flickering and rendering artifacts
+public class MenuPanel : Panel {
+    public MenuPanel() {
+        this.DoubleBuffered = true;
+        this.SetStyle(
+            ControlStyles.AllPaintingInWmPaint |
+            ControlStyles.UserPaint |
+            ControlStyles.OptimizedDoubleBuffer, true);
+        this.ResizeRedraw = true;
+    }
+}
 '@
 
+# ── Colours (matching Windows 11 dark context menu) ──────────────────────────
+$C_BG       = [System.Drawing.Color]::FromArgb(30, 30, 30)
+$C_TOOLBAR  = [System.Drawing.Color]::FromArgb(44, 44, 44)
+$C_ROW      = [System.Drawing.Color]::FromArgb(32, 32, 32)
+$C_ROW_HOV  = [System.Drawing.Color]::FromArgb(58, 58, 58)
+$C_ROW_DIS  = [System.Drawing.Color]::FromArgb(22, 22, 22)
+$C_TXT      = [System.Drawing.Color]::FromArgb(242, 242, 242)
+$C_TXT_DIS  = [System.Drawing.Color]::FromArgb(85,  85,  85)
+$C_SEP      = [System.Drawing.Color]::FromArgb(50,  50,  50)
+$C_BTN_HIDE = [System.Drawing.Color]::FromArgb(180, 40, 40)
+$C_BTN_SHOW = [System.Drawing.Color]::FromArgb(30, 130, 50)
+
+$ROW_H  = 34
+$ICON_X = 12
+$TEXT_X = 36
+$BTN_W  = 52
+
+# Pre-create shared GDI resources
+$GDI = @{
+    fontNorm   = New-Object System.Drawing.Font('Segoe UI', 9)
+    fontStrike = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Strikeout)
+    fontBtn    = New-Object System.Drawing.Font('Segoe UI', 8)
+    fontArrow  = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+    sfMid      = (& { $sf = New-Object System.Drawing.StringFormat; $sf.LineAlignment = 'Center'; $sf })
+    sfCenter   = (& { $sf = New-Object System.Drawing.StringFormat; $sf.Alignment = 'Center'; $sf.LineAlignment = 'Center'; $sf })
+}
+
 # ── Registry helpers ──────────────────────────────────────────────────────────
-function rOpen([string]$fullPath) {
-    $parts = $fullPath -split '\\', 2
+function rOpen([string]$p) {
+    $parts = $p -split '\\', 2
     if ($parts.Count -lt 2) { return $null }
     $root = switch ($parts[0]) {
         'HKEY_LOCAL_MACHINE' { [Microsoft.Win32.Registry]::LocalMachine }
@@ -86,216 +110,228 @@ function rOpen([string]$fullPath) {
         'HKEY_CLASSES_ROOT'  { [Microsoft.Win32.Registry]::ClassesRoot  }
         default              { return $null }
     }
-    if (-not $root) { return $null }
     return $root.OpenSubKey($parts[1], $false)
 }
-
 function rLabel([Microsoft.Win32.RegistryKey]$k) {
-    foreach ($name in @('MUIVerb', '')) {
-        $v = $k.GetValue($name)
-        if ($v -and [string]$v -ne '') { return [string]$v }
+    foreach ($n in @('MUIVerb', '')) {
+        $raw = $k.GetValue($n)
+        if (-not $raw) { continue }
+        $s = "$raw"
+        if (-not $s) { continue }
+        # Resolve @dll,-id MUI resource references
+        if ($s.StartsWith('@')) { $s = [MuiUtil]::Resolve($s) }
+        # Strip accelerator key markers (&) used in menu labels
+        $s = $s -replace '&', ''
+        if ($s) { return $s }
     }
     return $k.Name.Split('\')[-1]
 }
-
-function hkuShadow([string]$hive, [string]$subPath) {
-    if ($hive -eq 'HKCU') { return $subPath }
-    return $subPath -replace '^SOFTWARE\\Classes\\', 'Software\Classes\'
+function hkuShadow([string]$hive, [string]$sub) {
+    if ($hive -eq 'HKCU') { return $sub }
+    return $sub -replace '^SOFTWARE\\Classes\\', 'Software\Classes\'
 }
-
-function isVerbDisabled([string]$readPath, [string]$shadow) {
-    foreach ($p in @($readPath, "HKEY_CURRENT_USER\$shadow")) {
+function isVerbDisabled([string]$rp, [string]$sh) {
+    foreach ($p in @($rp, "HKEY_CURRENT_USER\$sh")) {
         $k = rOpen $p
-        if ($k) {
-            $dis = $k.GetValueNames() -icontains 'LegacyDisable'
-            $k.Close()
-            if ($dis) { return $true }
-        }
+        if ($k) { $d = $k.GetValueNames() -icontains 'LegacyDisable'; $k.Close(); if ($d) { return $true } }
+    }
+    return $false
+}
+function isShellExDisabled([string]$rp, [string]$sh) {
+    foreach ($p in @("HKEY_CURRENT_USER\$sh", $rp)) {
+        $k = rOpen $p
+        if ($k) { $v = "$($k.GetValue(''))"; $k.Close(); if ($v) { return $v.StartsWith('-') } }
     }
     return $false
 }
 
-function isShellExDisabled([string]$readPath, [string]$shadow) {
-    foreach ($p in @("HKEY_CURRENT_USER\$shadow", $readPath)) {
-        $k = rOpen $p
-        if ($k) {
-            $v = [string]$k.GetValue('')
-            $k.Close()
-            if ($v) { return $v.StartsWith('-') }
-        }
-    }
-    return $false
-}
+# Verb names Windows explicitly hides from right-click menus.
+# printto  = "Print to" handler, only invoked via drag-to-printer, never shown in menu.
+# runas    = "Run as administrator" - Windows only shows this on .exe/.bat/.cmd etc.
+# opennewwindow, explore, find = folder/shell-internal actions.
+$script:HIDDEN_VERBS = [System.Collections.Generic.HashSet[string]]::new(
+    [string[]]@('printto','runas','opennewwindow','explore','find','printto32'),
+    [System.StringComparer]::OrdinalIgnoreCase)
 
-# ── Scanners ──────────────────────────────────────────────────────────────────
-function scanVerbs([string]$hive, [string]$subPath, [string]$appliesTo) {
-    $results = [System.Collections.Generic.List[CmEntry]]::new()
-    $hiveWord = if ($hive -eq 'HKLM') { 'HKEY_LOCAL_MACHINE' } else { 'HKEY_CURRENT_USER' }
-    $shell = rOpen "$hiveWord\$subPath"
-    if (-not $shell) { return $results }
-
-    $shBase = hkuShadow $hive $subPath
-
-    foreach ($verb in $shell.GetSubKeyNames()) {
+# ── Registry scanners ─────────────────────────────────────────────────────────
+function scanVerbs([string]$hive, [string]$sub, [string]$applies) {
+    $out = [System.Collections.Generic.List[CmEntry]]::new()
+    $hw  = if ($hive -eq 'HKLM') { 'HKEY_LOCAL_MACHINE' } else { 'HKEY_CURRENT_USER' }
+    $shell = rOpen "$hw\$sub"; if (-not $shell) { return $out }
+    $base  = hkuShadow $hive $sub
+    foreach ($v in $shell.GetSubKeyNames()) {
         try {
-            $vk = $shell.OpenSubKey($verb)
-            if (-not $vk) { continue }
-            $label     = rLabel $vk
-            $isSubmenu = $null -ne $vk.GetValue('SubCommands')
-            $vk.Close()
-
+            if ($script:HIDDEN_VERBS.Contains($v)) { continue }  # skip Windows-internal hidden verbs
+            $vk = $shell.OpenSubKey($v); if (-not $vk) { continue }
+            # Skip verbs with "Extended" value - Windows only shows these on Shift+right-click
+            $isExtended = $null -ne $vk.GetValue('Extended')
+            $label = rLabel $vk; $isSub = $null -ne $vk.GetValue('SubCommands'); $vk.Close()
+            if ($isExtended) { continue }
             $e = [CmEntry]::new()
-            $e.VerbName   = $verb
-            $e.Label      = $label
-            $e.AppliesTo  = $appliesTo
-            $e.Source     = $hive
-            $e.Kind       = if ($isSubmenu) { 'Submenu' } else { 'Verb' }
-            $e.ReadPath   = "$hiveWord\$subPath\$verb"
-            $e.ShadowPath = "$shBase\$verb"
-            $e.Enabled    = -not (isVerbDisabled $e.ReadPath $e.ShadowPath)
-            $e.IsSubmenu  = $isSubmenu
-            $results.Add($e)
+            $e.VerbName=$v; $e.Label=$label; $e.AppliesTo=$applies; $e.Source=$hive
+            $e.Kind = if ($isSub) { 'Submenu' } else { 'Verb' }
+            $e.ReadPath="$hw\$sub\$v"; $e.ShadowPath="$base\$v"
+            $e.Enabled=-not(isVerbDisabled $e.ReadPath $e.ShadowPath); $e.IsSubmenu=$isSub
+            $out.Add($e)
         } catch { }
     }
-    $shell.Close()
-    return $results
+    $shell.Close(); return $out
 }
-
-function scanShellEx([string]$hive, [string]$subPath, [string]$appliesTo) {
-    $results = [System.Collections.Generic.List[CmEntry]]::new()
-    $hiveWord = if ($hive -eq 'HKLM') { 'HKEY_LOCAL_MACHINE' } else { 'HKEY_CURRENT_USER' }
-    $handlers = rOpen "$hiveWord\$subPath"
-    if (-not $handlers) { return $results }
-
-    $shBase = hkuShadow $hive $subPath
-
-    foreach ($name in $handlers.GetSubKeyNames()) {
+function scanShellEx([string]$hive, [string]$sub, [string]$applies) {
+    $out = [System.Collections.Generic.List[CmEntry]]::new()
+    $hw  = if ($hive -eq 'HKLM') { 'HKEY_LOCAL_MACHINE' } else { 'HKEY_CURRENT_USER' }
+    $h   = rOpen "$hw\$sub"; if (-not $h) { return $out }
+    $base = hkuShadow $hive $sub
+    foreach ($n in $h.GetSubKeyNames()) {
         try {
-            $hk = $handlers.OpenSubKey($name)
-            if (-not $hk) { continue }
-            $clsidRaw = [string]$hk.GetValue('')
-            $hk.Close()
-            if (-not $clsidRaw) { continue }
-
-            $clsidClean = $clsidRaw.TrimStart('-')
-            $label = $name
-            $ck = rOpen "HKEY_CLASSES_ROOT\CLSID\$clsidClean"
+            $hk = $h.OpenSubKey($n); if (-not $hk) { continue }
+            $clsRaw = "$($hk.GetValue(''))"; $hk.Close(); if (-not $clsRaw) { continue }
+            $cls = $clsRaw.TrimStart('-')
+            $label = $n
+            # Key name may itself be a CLSID (e.g. {90AA3A4E...}) - look that up too
+            $clsidToLookup = if ($n -match '^\{[0-9A-F-]+\}$') { $n } else { $cls }
+            $ck = rOpen "HKEY_CLASSES_ROOT\CLSID\$clsidToLookup"
             if ($ck) {
-                $fn = [string]$ck.GetValue('')
-                if ($fn) { $label = "$name  [$fn]" }
-                $ck.Close()
+                $fn = "$($ck.GetValue(''))"; $ck.Close()
+                if ($fn) { $label = if ($n -eq $clsidToLookup) { $fn } else { "$n  [$fn]" } }
+            } elseif ($cls -and -not $cls.StartsWith('{')) {
+                # Value is a plain string name (e.g. "Taskband Pin") - use it
+                $label = $cls
             }
-
-            $e = [CmEntry]::new()
-            $e.VerbName   = $name
-            $e.Label      = $label
-            $e.AppliesTo  = $appliesTo
-            $e.Source     = $hive
-            $e.Kind       = 'ShellEx'
-            $e.ReadPath   = "$hiveWord\$subPath\$name"
-            $e.ShadowPath = "$shBase\$name"
-            $e.ClsId      = $clsidClean
-            $e.Enabled    = -not (isShellExDisabled $e.ReadPath $e.ShadowPath)
-            $results.Add($e)
+            $e = [CmEntry]::new(); $e.VerbName=$n; $e.Label=$label; $e.AppliesTo=$applies; $e.Source=$hive
+            $e.Kind='ShellEx'; $e.ReadPath="$hw\$sub\$n"; $e.ShadowPath="$base\$n"
+            $e.ClsId=$cls; $e.Enabled=-not(isShellExDisabled $e.ReadPath $e.ShadowPath)
+            $out.Add($e)
         } catch { }
     }
-    $handlers.Close()
-    return $results
+    $h.Close(); return $out
 }
-
-function getExtEntries([string[]]$exts, [string]$typeName) {
-    $seen    = [System.Collections.Generic.Dictionary[string,CmEntry]]::new()
-    $shadows = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.List[string]]]::new()
-
+function scanExtGroup([string[]]$exts, [string]$type) {
+    $seen  = [System.Collections.Generic.Dictionary[string,CmEntry]]::new()
+    $paths = [System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[string]]]::new()
     foreach ($ext in $exts) {
-        foreach ($hive in @('HKCU', 'HKLM')) {
-            $hiveWord = if ($hive -eq 'HKLM') { 'HKEY_LOCAL_MACHINE' } else { 'HKEY_CURRENT_USER' }
-            $sub  = if ($hive -eq 'HKLM') { "SOFTWARE\Classes\SystemFileAssociations\$ext\shell" } `
-                    else                   { "Software\Classes\SystemFileAssociations\$ext\shell" }
-            $shell = rOpen "$hiveWord\$sub"
-            if (-not $shell) { continue }
-
-            foreach ($verb in $shell.GetSubKeyNames()) {
+        foreach ($hive in @('HKCU','HKLM')) {
+            $hw  = if ($hive -eq 'HKLM') { 'HKEY_LOCAL_MACHINE' } else { 'HKEY_CURRENT_USER' }
+            $sub = if ($hive -eq 'HKLM') { "SOFTWARE\Classes\SystemFileAssociations\$ext\shell" } `
+                   else { "Software\Classes\SystemFileAssociations\$ext\shell" }
+            $shell = rOpen "$hw\$sub"; if (-not $shell) { continue }
+            foreach ($v in $shell.GetSubKeyNames()) {
                 try {
-                    $vk = $shell.OpenSubKey($verb)
-                    if (-not $vk) { continue }
-                    $label     = rLabel $vk
-                    $isSubmenu = $null -ne $vk.GetValue('SubCommands')
-                    $vk.Close()
-
-                    $shPath = "Software\Classes\SystemFileAssociations\$ext\shell\$verb"
-
-                    if (-not $seen.ContainsKey($verb)) {
-                        $e = [CmEntry]::new()
-                        $e.VerbName   = $verb
-                        $e.Label      = $label
-                        $e.AppliesTo  = $typeName
-                        $e.Source     = $hive
-                        $e.Kind       = if ($isSubmenu) { 'Submenu' } else { 'Verb' }
-                        $e.ReadPath   = "$hiveWord\$sub\$verb"
-                        $e.ShadowPath = $shPath
-                        $e.Enabled    = -not (isVerbDisabled $e.ReadPath $e.ShadowPath)
-                        $e.IsSubmenu  = $isSubmenu
-                        $seen[$verb]    = $e
-                        $shadows[$verb] = [System.Collections.Generic.List[string]]::new()
+                    if ($script:HIDDEN_VERBS.Contains($v)) { continue }
+                    $vk = $shell.OpenSubKey($v); if (-not $vk) { continue }
+                    $isExtended = $null -ne $vk.GetValue('Extended')
+                    $label = rLabel $vk; $isSub = $null -ne $vk.GetValue('SubCommands'); $vk.Close()
+                    if ($isExtended) { continue }
+                    $sp = "Software\Classes\SystemFileAssociations\$ext\shell\$v"
+                    if (-not $seen.ContainsKey($v)) {
+                        $e = [CmEntry]::new(); $e.VerbName=$v; $e.Label=$label; $e.AppliesTo=$type; $e.Source=$hive
+                        $e.Kind = if ($isSub) { 'Submenu' } else { 'Verb' }
+                        $e.ReadPath="$hw\$sub\$v"; $e.ShadowPath=$sp
+                        $e.Enabled=-not(isVerbDisabled $e.ReadPath $e.ShadowPath); $e.IsSubmenu=$isSub
+                        $seen[$v]=$e; $paths[$v]=[System.Collections.Generic.List[string]]::new()
                     }
-                    $shadows[$verb].Add($shPath)
+                    $paths[$v].Add($sp)
                 } catch { }
             }
             $shell.Close()
         }
     }
-
-    foreach ($verb in $seen.Keys) {
-        $seen[$verb].ShadowPath = ($shadows[$verb] | Sort-Object -Unique) -join ';'
-    }
+    foreach ($v in $seen.Keys) { $seen[$v].ShadowPath = ($paths[$v] | Sort-Object -Unique) -join ';' }
     return $seen.Values
+}
+# Scan shell verbs registered under ProgIDs for a set of extensions.
+# E.g. VLC registers Play/AddToPlaylist under HKCR\VLC.mp4\shell, not SystemFileAssociations.
+function scanProgIdShell([string[]]$exts, [string]$applies) {
+    $out   = [System.Collections.Generic.List[CmEntry]]::new()
+    $pids  = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $hkcr  = [Microsoft.Win32.Registry]::ClassesRoot
+
+    foreach ($ext in $exts) {
+        $ek = $hkcr.OpenSubKey($ext); if (-not $ek) { continue }
+        $def = "$($ek.GetValue(''))"
+        if ($def) { [void]$pids.Add($def) }
+        $owi = $ek.OpenSubKey('OpenWithProgids')
+        if ($owi) { foreach ($n in $owi.GetValueNames()) { if ($n) { [void]$pids.Add($n) } }; $owi.Close() }
+        $ek.Close()
+    }
+
+    foreach ($progId in $pids) {
+        $shellKey = $hkcr.OpenSubKey("$progId\shell"); if (-not $shellKey) { continue }
+        foreach ($v in $shellKey.GetSubKeyNames()) {
+            try {
+                if ($script:HIDDEN_VERBS.Contains($v)) { continue }
+                $vk = $shellKey.OpenSubKey($v); if (-not $vk) { continue }
+                $isExtended = $null -ne $vk.GetValue('Extended')
+                $label = rLabel $vk; $isSub = $null -ne $vk.GetValue('SubCommands'); $vk.Close()
+                if ($isExtended) { continue }
+                $e = [CmEntry]::new()
+                $e.VerbName    = $v; $e.Label = $label; $e.AppliesTo = $applies; $e.Source = 'HKCR'
+                $e.Kind        = if ($isSub) { 'Submenu' } else { 'Verb' }
+                $e.ReadPath    = "HKEY_CLASSES_ROOT\$progId\shell\$v"
+                $e.ShadowPath  = "Software\Classes\$progId\shell\$v"
+                $e.Enabled     = -not (isVerbDisabled $e.ReadPath $e.ShadowPath)
+                $e.IsSubmenu   = $isSub
+                $out.Add($e)
+            } catch { }
+        }
+        $shellKey.Close()
+    }
+    return $out
 }
 
 function getAllEntries {
-    $all   = [System.Collections.Generic.List[CmEntry]]::new()
-    $addAll = { param($col) foreach ($e in $col) { if ($e) { $all.Add($e) } } }
-
+    $all = [System.Collections.Generic.List[CmEntry]]::new()
+    $add = { param($c) foreach ($e in $c) { if ($e) { $all.Add($e) } } }
     @(
-        @('HKLM','SOFTWARE\Classes\*\shell',                    'All Files'),
-        @('HKCU','Software\Classes\*\shell',                    'All Files'),
-        @('HKLM','SOFTWARE\Classes\Directory\shell',            'Folders'),
-        @('HKCU','Software\Classes\Directory\shell',            'Folders'),
-        @('HKLM','SOFTWARE\Classes\Directory\Background\shell', 'Folder Background'),
-        @('HKCU','Software\Classes\Directory\Background\shell', 'Folder Background'),
-        @('HKLM','SOFTWARE\Classes\Drive\shell',                'Drives'),
-        @('HKCU','Software\Classes\Drive\shell',                'Drives')
-    ) | ForEach-Object { & $addAll (scanVerbs $_[0] $_[1] $_[2]) }
-
+        @('HKLM','SOFTWARE\Classes\*\shell','All Files'),
+        @('HKCU','Software\Classes\*\shell','All Files'),
+        @('HKLM','SOFTWARE\Classes\Directory\shell','Folders'),
+        @('HKCU','Software\Classes\Directory\shell','Folders'),
+        @('HKLM','SOFTWARE\Classes\Directory\Background\shell','Folder Background'),
+        @('HKCU','Software\Classes\Directory\Background\shell','Folder Background'),
+        @('HKLM','SOFTWARE\Classes\Drive\shell','Drives'),
+        @('HKCU','Software\Classes\Drive\shell','Drives')
+    ) | ForEach-Object { & $add (scanVerbs $_[0] $_[1] $_[2]) }
     @(
-        @('HKLM','SOFTWARE\Classes\*\shellex\ContextMenuHandlers',                    'All Files'),
-        @('HKCU','Software\Classes\*\shellex\ContextMenuHandlers',                    'All Files'),
-        @('HKLM','SOFTWARE\Classes\Directory\shellex\ContextMenuHandlers',            'Folders'),
-        @('HKCU','Software\Classes\Directory\shellex\ContextMenuHandlers',            'Folders'),
-        @('HKLM','SOFTWARE\Classes\Directory\Background\shellex\ContextMenuHandlers', 'Folder Background'),
-        @('HKCU','Software\Classes\Directory\Background\shellex\ContextMenuHandlers', 'Folder Background')
-    ) | ForEach-Object { & $addAll (scanShellEx $_[0] $_[1] $_[2]) }
-
-    $videoExts = @('.mp4','.mkv','.avi','.mov','.wmv','.webm','.m4v','.mpg','.mpeg','.ts','.mts','.m2ts','.flv','.f4v')
+        @('HKLM','SOFTWARE\Classes\*\shellex\ContextMenuHandlers','All Files'),
+        @('HKCU','Software\Classes\*\shellex\ContextMenuHandlers','All Files'),
+        @('HKLM','SOFTWARE\Classes\Directory\shellex\ContextMenuHandlers','Folders'),
+        @('HKCU','Software\Classes\Directory\shellex\ContextMenuHandlers','Folders'),
+        @('HKLM','SOFTWARE\Classes\Directory\Background\shellex\ContextMenuHandlers','Folder Background'),
+        @('HKCU','Software\Classes\Directory\Background\shellex\ContextMenuHandlers','Folder Background')
+    ) | ForEach-Object { & $add (scanShellEx $_[0] $_[1] $_[2]) }
+    $videoExts = @('.mp4','.mkv','.avi','.mov','.wmv','.webm','.m4v','.mpg','.mpeg','.ts','.mts','.m2ts','.flv')
     $imageExts = @('.jpg','.jpeg','.png','.webp','.bmp','.tiff','.tif')
-    & $addAll (getExtEntries $videoExts 'Video Files')
-    & $addAll (getExtEntries $imageExts 'Image Files')
-
+    & $add (scanExtGroup $videoExts 'Video Files')
+    & $add (scanExtGroup $imageExts 'Image Files')
+    # ProgID verbs (e.g. VLC.mp4\shell - where VLC registers Play/AddToPlaylist)
+    & $add (scanProgIdShell $videoExts 'Video Files')
+    & $add (scanProgIdShell $imageExts 'Image Files')
+    # Perceived-type keys - where VLC, Clipchamp, Filmora etc. register
+    @(
+        @('HKLM','SOFTWARE\Classes\SystemFileAssociations\video\shell','Video Files'),
+        @('HKCU','Software\Classes\SystemFileAssociations\video\shell','Video Files'),
+        @('HKLM','SOFTWARE\Classes\SystemFileAssociations\image\shell','Image Files'),
+        @('HKCU','Software\Classes\SystemFileAssociations\image\shell','Image Files'),
+        @('HKLM','SOFTWARE\Classes\video\shell','Video Files'),
+        @('HKCU','Software\Classes\video\shell','Video Files'),
+        @('HKLM','SOFTWARE\Classes\image\shell','Image Files'),
+        @('HKCU','Software\Classes\image\shell','Image Files')
+    ) | ForEach-Object { & $add (scanVerbs $_[0] $_[1] $_[2]) }
     return $all
 }
 
-# ── Apply enable/disable ──────────────────────────────────────────────────────
+# ── Apply enable/disable (HKCU writes only) ───────────────────────────────────
 function applyEntry([CmEntry]$entry, [bool]$enable) {
     $hkcu = [Microsoft.Win32.Registry]::CurrentUser
-
     if ($entry.Kind -ne 'ShellEx') {
-        foreach ($shadow in ($entry.ShadowPath -split ';')) {
+        foreach ($sh in ($entry.ShadowPath -split ';')) {
             try {
-                $k = $hkcu.OpenSubKey($shadow, $true)
-                if (-not $k -and -not $enable) { $k = $hkcu.CreateSubKey($shadow) }
+                $k = $hkcu.OpenSubKey($sh, $true)
+                if (-not $k -and -not $enable) { $k = $hkcu.CreateSubKey($sh) }
                 if ($k) {
                     if ($enable) { try { $k.DeleteValue('LegacyDisable') } catch { } }
-                    else         { $k.SetValue('LegacyDisable', '', [Microsoft.Win32.RegistryValueKind]::String) }
+                    else { $k.SetValue('LegacyDisable','', [Microsoft.Win32.RegistryValueKind]::String) }
                     $k.Close()
                 }
             } catch { }
@@ -305,359 +341,335 @@ function applyEntry([CmEntry]$entry, [bool]$enable) {
             $k = $hkcu.OpenSubKey($entry.ShadowPath, $true)
             if (-not $k) { $k = $hkcu.CreateSubKey($entry.ShadowPath) }
             if ($k) {
-                $val = if ($enable) { $entry.ClsId } else { "-$($entry.ClsId)" }
-                $k.SetValue('', $val, [Microsoft.Win32.RegistryValueKind]::String)
+                $k.SetValue('', (if ($enable) { $entry.ClsId } else { "-$($entry.ClsId)" }),
+                    [Microsoft.Win32.RegistryValueKind]::String)
                 $k.Close()
             }
         } catch { }
     }
 }
-
 function notifyShell {
     Add-Type -TypeDefinition @'
 using System; using System.Runtime.InteropServices;
-public class CtxShell {
-    [DllImport("shell32.dll")]
-    public static extern void SHChangeNotify(int e, uint f, IntPtr a, IntPtr b);
+public class CtxSh3 {
+    [DllImport("shell32.dll")] public static extern void SHChangeNotify(int e,uint f,IntPtr a,IntPtr b);
 }
 '@ -ErrorAction SilentlyContinue
-    try { [CtxShell]::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero) } catch { }
+    try { [CtxSh3]::SHChangeNotify(0x08000000,0,[IntPtr]::Zero,[IntPtr]::Zero) } catch { }
 }
 
-# ── Icon helpers ──────────────────────────────────────────────────────────────
-$script:imgCache = [System.Collections.Generic.Dictionary[string,int]]::new()
+# ── Icon loading ──────────────────────────────────────────────────────────────
+$script:imgCache = [System.Collections.Generic.Dictionary[string,System.Drawing.Bitmap]]::new()
 
-function initImageList {
-    $il = New-Object System.Windows.Forms.ImageList
-    $il.ImageSize  = New-Object System.Drawing.Size(16, 16)
-    $il.ColorDepth = 'Depth32Bit'
-
-    # Load fallback famfamfam icons by index (0=verb/wrench, 1=submenu/go, 2=shellex/cog)
-    $root = $PSScriptRoot
-    foreach ($rel in @(
-        '..\transcribe\icons\wrench.png',   # 0 - Verb
-        '..\taskmon\icons\bullet_go.png',   # 1 - Submenu
-        '..\taskmon\icons\cog.png'          # 2 - ShellEx
-    )) {
-        $p = Join-Path $root $rel
-        try {
-            # Do NOT dispose bitmaps here - ImageList stores a reference (not a copy)
-            # until its GDI handle is lazily created on first display. Disposing
-            # early causes "Parameter is not valid" in ImageList.CreateHandle().
-            $bmp = if (Test-Path $p) { [System.Drawing.Bitmap]::new($p) } `
-                   else               { [System.Drawing.Bitmap]::new(16, 16) }
-            $il.Images.Add($bmp)
-        } catch { $il.Images.Add([System.Drawing.Bitmap]::new(16, 16)) }
+function getFallback([CmEntry]$e) {
+    $rel = switch ($e.Kind) {
+        'ShellEx'  { '..\taskmon\icons\cog.png' }
+        'Submenu'  { '..\taskmon\icons\bullet_go.png' }
+        default    { '..\transcribe\icons\wrench.png' }
     }
-    return $il
+    $p = Join-Path $PSScriptRoot $rel
+    try { if (Test-Path $p) { return [System.Drawing.Bitmap]::new($p) } } catch { }
+    $bmp = New-Object System.Drawing.Bitmap(16,16); return $bmp
 }
-
-function fallbackIndex([CmEntry]$e) {
-    if ($e.Kind -eq 'ShellEx')  { return 2 }
-    if ($e.Kind -eq 'Submenu')  { return 1 }
-    return 0
-}
-
-function getIconIndex([CmEntry]$entry, [System.Windows.Forms.ImageList]$il) {
-    # 1. Try Icon value on the verb key
-    $iconSpec = $null
+function getEntryBitmap([CmEntry]$entry) {
+    $spec = $null
     $vk = rOpen $entry.ReadPath
-    if ($vk) {
-        $iconSpec = $vk.GetValue('Icon')
-        $vk.Close()
+    if ($vk) { $spec = $vk.GetValue('Icon'); $vk.Close() }
+    if (-not $spec -and $entry.Kind -eq 'ShellEx' -and $entry.ClsId) {
+        $ck = rOpen "HKEY_CLASSES_ROOT\CLSID\$($entry.ClsId)\InprocServer32"
+        if ($ck) { $dll = "$($ck.GetValue(''))"; $ck.Close(); if ($dll) { $spec = "$dll,0" } }
     }
-
-    # 2. For ShellEx with no Icon value, try InprocServer32 path
-    if (-not $iconSpec -and $entry.Kind -eq 'ShellEx' -and $entry.ClsId) {
-        $ipk = rOpen "HKEY_CLASSES_ROOT\CLSID\$($entry.ClsId)\InprocServer32"
-        if ($ipk) {
-            $dll = [string]$ipk.GetValue('')
-            $ipk.Close()
-            if ($dll) { $iconSpec = "$dll,0" }
-        }
-    }
-
-    if (-not $iconSpec) { return fallbackIndex $entry }
-
-    $cacheKey = [string]$iconSpec
-    if ($script:imgCache.ContainsKey($cacheKey)) { return $script:imgCache[$cacheKey] }
-
+    if (-not $spec) { return getFallback $entry }
+    $key = "$spec"
+    if ($script:imgCache.ContainsKey($key)) { return $script:imgCache[$key] }
     try {
-        $raw = [System.Environment]::ExpandEnvironmentVariables([string]$iconSpec).Trim()
-        # Skip MUI localized string refs (@file,-resId) - not icon paths
-        if ($raw.StartsWith('@')) {
-            $script:imgCache[$cacheKey] = fallbackIndex $entry
-            return fallbackIndex $entry
-        }
-
-        $idx   = 0
-        $comma = $raw.LastIndexOf(',')
-        $spec  = if ($comma -gt 2) {
-            [int]::TryParse($raw.Substring($comma + 1), [ref]$idx) | Out-Null
-            $raw.Substring(0, $comma)
+        $raw = [System.Environment]::ExpandEnvironmentVariables($key).Trim()
+        if ($raw.StartsWith('@')) { throw 'MUI' }
+        $idx = 0; $comma = $raw.LastIndexOf(',')
+        $path = if ($comma -gt 2) {
+            [int]::TryParse($raw.Substring($comma+1),[ref]$idx)|Out-Null
+            $raw.Substring(0,$comma)
         } else { $raw }
-        $spec = $spec.Trim().Trim('"').Trim("'").Trim()  # strip any surrounding quotes
-
-        $pathOk = $false
-        try { $pathOk = [System.IO.File]::Exists($spec) } catch { }
-        if (-not $pathOk) {
-            $script:imgCache[$cacheKey] = fallbackIndex $entry
-            return fallbackIndex $entry
-        }
-
-        $icon = [IconUtil]::GetSmall($spec, $idx)
-        if (-not $icon) { $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($spec) }
-
+        $path = $path.Trim().Trim('"').Trim("'")
+        if (-not [System.IO.File]::Exists($path)) { throw 'missing' }
+        $icon = [IconUtil]::GetSmall($path, $idx)
+        if (-not $icon) { $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($path) }
         if ($icon) {
-            $bmp   = $icon.ToBitmap()
-            $small = New-Object System.Drawing.Bitmap(16, 16)
-            $g     = [System.Drawing.Graphics]::FromImage($small)
-            $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-            $g.DrawImage($bmp, 0, 0, 16, 16)
-            $g.Dispose(); $bmp.Dispose(); $icon.Dispose()
-
-            $imgIdx = $il.Images.Count
-            $il.Images.Add($small)
-            $script:imgCache[$cacheKey] = $imgIdx
-            return $imgIdx
+            $bmp = New-Object System.Drawing.Bitmap(16,16)
+            $g   = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.InterpolationMode = 'HighQualityBicubic'
+            $g.DrawImage($icon.ToBitmap(), 0, 0, 16, 16)
+            $g.Dispose(); $icon.Dispose()
+            $script:imgCache[$key] = $bmp; return $bmp
         }
-    } catch {
-        logEx $_.Exception "getIconIndex spec=[$iconSpec]"
+    } catch { }
+    $fb = getFallback $entry; $script:imgCache[$key] = $fb; return $fb
+}
+
+# ── Owner-draw paint routine ──────────────────────────────────────────────────
+function paintList([System.Windows.Forms.PaintEventArgs]$pe, [int]$panelW) {
+    $g = $pe.Graphics
+    $g.TextRenderingHint = 'ClearTypeGridFit'
+    $g.SmoothingMode     = 'AntiAlias'
+
+    $y = 0
+    for ($i = 0; $i -lt $script:displayItems.Count; $i++) {
+        $item = $script:displayItems[$i]
+        $hov  = ($i -eq $script:hoveredIdx)
+
+        # ---- background
+        $bgC = if ($hov) { $C_ROW_HOV } elseif ($item.Enabled) { $C_ROW } else { $C_ROW_DIS }
+        $bgB = [System.Drawing.SolidBrush]::new($bgC)
+        $g.FillRectangle($bgB, 0, $y, $panelW, $ROW_H); $bgB.Dispose()
+
+        # ---- icon
+        $bmp = getEntryBitmap $item
+        if ($bmp) {
+            if (-not $item.Enabled) {
+                $ia = New-Object System.Drawing.Imaging.ImageAttributes
+                $cm = New-Object System.Drawing.Imaging.ColorMatrix; $cm.Matrix33 = 0.3
+                $ia.SetColorMatrix($cm)
+                $dest = New-Object System.Drawing.Rectangle($ICON_X, ($y+9), 16, 16)
+                $g.DrawImage($bmp, $dest, 0, 0, $bmp.Width, $bmp.Height, 'Pixel', $ia)
+            } else {
+                $g.DrawImage($bmp, $ICON_X, ($y+9), 16, 16)
+            }
+        }
+
+        # ---- text
+        $txtC  = if ($item.Enabled) { $C_TXT } else { $C_TXT_DIS }
+        $txtB  = [System.Drawing.SolidBrush]::new($txtC)
+        $font  = if ($item.Enabled) { $GDI.fontNorm } else { $GDI.fontStrike }
+        $tR    = New-Object System.Drawing.RectangleF($TEXT_X, $y, ($panelW - $TEXT_X - 75), $ROW_H)
+        $g.DrawString($item.Label, $font, $txtB, $tR, $GDI.sfMid); $txtB.Dispose()
+
+        # ---- submenu arrow
+        if ($item.IsSubmenu) {
+            $aB = [System.Drawing.SolidBrush]::new($txtC)
+            $aR = New-Object System.Drawing.RectangleF(($panelW - 20), $y, 16, $ROW_H)
+            $g.DrawString('>', $GDI.fontArrow, $aB, $aR, $GDI.sfCenter); $aB.Dispose()
+        }
+
+        # ---- action button (shown on hover)
+        if ($hov) {
+            $btnLabel = if ($item.Enabled) { 'Hide' } else { 'Show' }
+            $btnClr   = if ($item.Enabled) { $C_BTN_HIDE } else { $C_BTN_SHOW }
+            $btnRect  = New-Object System.Drawing.Rectangle(($panelW - $BTN_W - 6), ($y+5), $BTN_W, ($ROW_H-10))
+            $btnPen   = New-Object System.Drawing.Pen($btnClr, 1)
+            $g.DrawRectangle($btnPen, $btnRect); $btnPen.Dispose()
+            $btnBrush = New-Object System.Drawing.SolidBrush($btnClr)
+            $g.FillRectangle($btnBrush, $btnRect); $btnBrush.Dispose()
+            $wB = [System.Drawing.Brushes]::White
+            $g.DrawString($btnLabel, $GDI.fontBtn, $wB, [System.Drawing.RectangleF]::op_Implicit($btnRect), $GDI.sfCenter)
+        }
+
+        # ---- separator
+        $sepP = New-Object System.Drawing.Pen($C_SEP, 1)
+        $g.DrawLine($sepP, 0, ($y+$ROW_H-1), $panelW, ($y+$ROW_H-1)); $sepP.Dispose()
+
+        $y += $ROW_H
+    }
+}
+
+# ── Form icon ─────────────────────────────────────────────────────────────────
+function pngToIcon([string]$p) {
+    $b=$([System.IO.File]::ReadAllBytes($p))
+    $ms=New-Object System.IO.MemoryStream
+    $w=New-Object System.IO.BinaryWriter($ms)
+    $w.Write([uint16]0);$w.Write([uint16]1);$w.Write([uint16]1)
+    $w.Write([byte]16);$w.Write([byte]16);$w.Write([byte]0)
+    $w.Write([byte]0);$w.Write([uint16]1);$w.Write([uint16]32)
+    $w.Write([uint32]$b.Length);$w.Write([uint32]22);$w.Write($b)
+    $ms.Position=0; return [System.Drawing.Icon]::new($ms)
+}
+
+# ── Build display list ────────────────────────────────────────────────────────
+function buildDisplayItems {
+    $context     = $script:cbContext.SelectedItem
+    $showHidden  = $script:chkHidden.Checked
+
+    # File-type contexts include All Files items (7-Zip, Open with Code, etc.)
+    # because *\shell entries appear on every file including videos/images
+    $categories = if ($context -in @('Video Files','Image Files','All Files')) {
+        @($context, 'All Files')
+    } else {
+        @($context)
+    }
+    $contextItems = @($script:allEntries | Where-Object { $_.AppliesTo -in $categories })
+
+    # Deduplicate by VerbName (case-insensitive). Priority: HKCU > HKLM > HKCR
+    $deduped = [System.Collections.Generic.Dictionary[string,CmEntry]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($e in ($contextItems | Where-Object { $_.Source -eq 'HKCU' })) { $deduped[$e.VerbName] = $e }
+    foreach ($e in ($contextItems | Where-Object { $_.Source -ne 'HKCU' })) {
+        if (-not $deduped.ContainsKey($e.VerbName)) { $deduped[$e.VerbName] = $e }
     }
 
-    $script:imgCache[$cacheKey] = fallbackIndex $entry
-    return fallbackIndex $entry
+    $enabled  = @($deduped.Values | Where-Object {  $_.Enabled } | Sort-Object Label)
+    $disabled = @($deduped.Values | Where-Object { -not $_.Enabled } | Sort-Object Label)
+    $list = [System.Collections.Generic.List[CmEntry]]::new()
+    foreach ($e in $enabled)  { $list.Add($e) }
+    if ($showHidden) { foreach ($e in $disabled) { $list.Add($e) } }
+
+    $script:displayItems = $list
+    $h = [Math]::Max($list.Count * $ROW_H, 1)
+    $script:listPanel.Height = $h
+    $script:listPanel.Invalidate()
+
+    $total = $deduped.Count
+    $dis   = $disabled.Count
+    $script:lblStatus.Text = "$($total-$dis) visible  |  $dis hidden  |  $total total"
 }
 
-# ── Form icon (PNG-in-ICO via MemoryStream) ───────────────────────────────────
-function pngToIcon([string]$path) {
-    $bytes = [System.IO.File]::ReadAllBytes($path)
-    $ms = New-Object System.IO.MemoryStream
-    $w  = New-Object System.IO.BinaryWriter($ms)
-    $w.Write([uint16]0); $w.Write([uint16]1); $w.Write([uint16]1)
-    $w.Write([byte]16);  $w.Write([byte]16);  $w.Write([byte]0)
-    $w.Write([byte]0);   $w.Write([uint16]1); $w.Write([uint16]32)
-    $w.Write([uint32]$bytes.Length); $w.Write([uint32]22)
-    $w.Write($bytes)
-    $ms.Position = 0
-    return [System.Drawing.Icon]::new($ms)
+function reloadAll {
+    $script:lblStatus.Text = 'Scanning registry...'
+    $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+    $form.Refresh()
+    try   { $script:allEntries = getAllEntries }
+    finally { $form.Cursor = [System.Windows.Forms.Cursors]::Default }
+    $script:imgCache.Clear()
+    buildDisplayItems
 }
 
-# ── UI ────────────────────────────────────────────────────────────────────────
-$script:entries  = [CmEntry[]]@()
-$script:imageList = initImageList
+# ── UI setup ──────────────────────────────────────────────────────────────────
+$script:allEntries   = [CmEntry[]]@()
+$script:displayItems = [System.Collections.Generic.List[CmEntry]]::new()
+$script:hoveredIdx   = -1
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text          = 'Context Menu Manager'
-$form.Size          = New-Object System.Drawing.Size(980, 580)
-$form.MinimumSize   = New-Object System.Drawing.Size(700, 400)
+$form.Size          = New-Object System.Drawing.Size(520, 680)
+$form.MinimumSize   = New-Object System.Drawing.Size(380, 360)
 $form.StartPosition = 'CenterScreen'
 $form.Font          = New-Object System.Drawing.Font('Segoe UI', 9)
+$form.BackColor     = $C_BG
 
-$appIconPath = Join-Path $PSScriptRoot '..\taskmon\icons\application_view_list.png'
-if (Test-Path $appIconPath) {
-    try { $form.Icon = pngToIcon $appIconPath } catch { }
-}
+$iconPath = Join-Path $PSScriptRoot '..\taskmon\icons\application_view_list.png'
+if (Test-Path $iconPath) { try { $form.Icon = pngToIcon $iconPath } catch { } }
 
-# ── Toolbar ──
-$toolbar = New-Object System.Windows.Forms.FlowLayoutPanel
-$toolbar.Dock          = 'Top'
-$toolbar.Height        = 34
-$toolbar.Padding       = New-Object System.Windows.Forms.Padding(4, 4, 4, 0)
-$toolbar.FlowDirection = 'LeftToRight'
-$toolbar.WrapContents  = $false
+# Toolbar
+$toolbar = New-Object System.Windows.Forms.Panel
+$toolbar.Dock = 'Top'; $toolbar.Height = 44; $toolbar.BackColor = $C_TOOLBAR
 
-$lblFilter = New-Object System.Windows.Forms.Label
-$lblFilter.Text    = 'Show:'
-$lblFilter.AutoSize = $true
-$lblFilter.Margin   = New-Object System.Windows.Forms.Padding(0, 4, 4, 0)
+$lblCtx = New-Object System.Windows.Forms.Label
+$lblCtx.Text = 'Show menu for:'; $lblCtx.AutoSize = $true
+$lblCtx.ForeColor = [System.Drawing.Color]::FromArgb(175,175,175)
+$lblCtx.Top = 12; $lblCtx.Left = 10
 
-$cbFilter = New-Object System.Windows.Forms.ComboBox
-$cbFilter.DropDownStyle = 'DropDownList'
-$cbFilter.Width         = 160
-$cbFilter.Margin        = New-Object System.Windows.Forms.Padding(0, 1, 8, 0)
-$cbFilter.Items.AddRange(@('All', 'All Files', 'Folders', 'Folder Background', 'Video Files', 'Image Files', 'Drives'))
-$cbFilter.SelectedIndex = 0
+$script:cbContext = New-Object System.Windows.Forms.ComboBox
+$script:cbContext.DropDownStyle = 'DropDownList'
+$script:cbContext.Width = 160; $script:cbContext.Top = 8; $script:cbContext.Left = 110
+$script:cbContext.Items.AddRange(@('Folder Background','Folders','All Files','Video Files','Image Files','Drives'))
+$script:cbContext.SelectedIndex = 0
 
-$chkDisabled = New-Object System.Windows.Forms.CheckBox
-$chkDisabled.Text     = 'Show disabled'
-$chkDisabled.Checked  = $true
-$chkDisabled.AutoSize = $true
-$chkDisabled.Margin   = New-Object System.Windows.Forms.Padding(0, 3, 12, 0)
+$script:chkHidden = New-Object System.Windows.Forms.CheckBox
+$script:chkHidden.Text = 'Show hidden'; $script:chkHidden.Checked = $true
+$script:chkHidden.ForeColor = [System.Drawing.Color]::FromArgb(175,175,175)
+$script:chkHidden.AutoSize = $true; $script:chkHidden.Top = 11; $script:chkHidden.Left = 284
 
 $btnRefresh = New-Object System.Windows.Forms.Button
-$btnRefresh.Text   = 'Refresh'
-$btnRefresh.Width  = 70
-$btnRefresh.Height = 24
-$btnRefresh.Margin = New-Object System.Windows.Forms.Padding(0, 1, 0, 0)
+$btnRefresh.Text = 'Refresh'; $btnRefresh.Width = 68; $btnRefresh.Height = 26
+$btnRefresh.Top = 8; $btnRefresh.Left = 420
+$btnRefresh.FlatStyle = 'Flat'
+$btnRefresh.ForeColor = [System.Drawing.Color]::FromArgb(200,200,200)
+$btnRefresh.BackColor = [System.Drawing.Color]::FromArgb(65,65,65)
+$btnRefresh.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(85,85,85)
 
-$toolbar.Controls.AddRange(@($lblFilter, $cbFilter, $chkDisabled, $btnRefresh))
+$toolbar.Controls.AddRange(@($lblCtx, $script:cbContext, $script:chkHidden, $btnRefresh))
 
-# ── ListView ──
-$lv = New-Object System.Windows.Forms.ListView
-$lv.Dock           = 'Fill'
-$lv.View           = 'Details'
-$lv.CheckBoxes     = $true
-$lv.FullRowSelect  = $true
-$lv.GridLines      = $true
-$lv.SmallImageList = $script:imageList
-[void]$lv.Columns.Add('Name',        220)
-[void]$lv.Columns.Add('Applies To',  130)
-[void]$lv.Columns.Add('Kind',         65)
-[void]$lv.Columns.Add('Source',       55)
-[void]$lv.Columns.Add('Status',       70)
-[void]$lv.Columns.Add('Registry Key', 320)
+# Scroll container
+$scroll = New-Object System.Windows.Forms.Panel
+$scroll.Dock = 'Fill'; $scroll.BackColor = $C_BG; $scroll.AutoScroll = $true
+try {
+    $dp = [System.Windows.Forms.Panel].GetProperty('DoubleBuffered',[System.Reflection.BindingFlags]'NonPublic,Instance')
+    $dp.SetValue($scroll, $true)
+} catch { }
 
-# ── Bottom bar ──
-$bottom = New-Object System.Windows.Forms.Panel
-$bottom.Dock   = 'Bottom'
-$bottom.Height = 38
+# The owner-draw list panel inside the scroll container
+$script:listPanel = New-Object MenuPanel
+$script:listPanel.SetBounds(0, 0, 480, 1)
+$script:listPanel.BackColor = $C_BG
 
-$btnEnable = New-Object System.Windows.Forms.Button
-$btnEnable.Text   = 'Enable Selected'
-$btnEnable.Width  = 115
-$btnEnable.Height = 26
-$btnEnable.Left   = 6
-$btnEnable.Top    = 6
+# Paint handler - renders all items via GDI+
+$script:listPanel.add_Paint({
+    param($s, $e)
+    paintList $e $s.Width
+})
 
-$btnDisable = New-Object System.Windows.Forms.Button
-$btnDisable.Text   = 'Disable Selected'
-$btnDisable.Width  = 120
-$btnDisable.Height = 26
-$btnDisable.Left   = 128
-$btnDisable.Top    = 6
+# Resize: keep full width of scroll container
+$scroll.add_Resize({
+    $script:listPanel.Width = $scroll.ClientSize.Width
+    $script:listPanel.Invalidate()
+})
 
-$lblStatus = New-Object System.Windows.Forms.Label
-$lblStatus.AutoSize  = $true
-$lblStatus.Left      = 262
-$lblStatus.Top       = 12
-$lblStatus.Text      = 'Loading...'
-$lblStatus.ForeColor = [System.Drawing.Color]::Gray
+# Mouse hover
+$script:listPanel.add_MouseMove({
+    param($s, $e)
+    $idx = [int]($e.Y / $ROW_H)
+    if ($idx -ge $script:displayItems.Count) { $idx = -1 }
+    if ($idx -ne $script:hoveredIdx) {
+        $script:hoveredIdx = $idx
+        $s.Invalidate()
+    }
+    # Update tooltip
+    if ($idx -ge 0) {
+        $item = $script:displayItems[$idx]
+        $script:tip.SetToolTip($s, $item.ReadPath)
+    } else {
+        $script:tip.SetToolTip($s, '')
+    }
+})
+$script:listPanel.add_MouseLeave({
+    $script:hoveredIdx = -1
+    $script:listPanel.Invalidate()
+})
 
-$bottom.Controls.AddRange(@($btnEnable, $btnDisable, $lblStatus))
+# Click handler
+$script:listPanel.add_MouseClick({
+    param($s, $e)
+    $idx = [int]($e.Y / $ROW_H)
+    if ($idx -lt 0 -or $idx -ge $script:displayItems.Count) { return }
+    $item = $script:displayItems[$idx]
+    $newState = -not $item.Enabled
+    applyEntry $item $newState
+    notifyShell
+    $item.Enabled = $newState
+    buildDisplayItems
+})
 
-# Add controls: Fill control first so Top/Bottom docked controls overlay correctly
-$form.Controls.Add($lv)
-$form.Controls.Add($bottom)
+$script:tip = New-Object System.Windows.Forms.ToolTip
+
+$scroll.Controls.Add($script:listPanel)
+
+# Status bar
+$statusBar = New-Object System.Windows.Forms.Panel
+$statusBar.Dock = 'Bottom'; $statusBar.Height = 28; $statusBar.BackColor = $C_TOOLBAR
+
+$script:lblStatus = New-Object System.Windows.Forms.Label
+$script:lblStatus.Text = 'Loading...'
+$script:lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(140,140,140)
+$script:lblStatus.Font = New-Object System.Drawing.Font('Segoe UI', 8)
+$script:lblStatus.AutoSize = $true; $script:lblStatus.Top = 6; $script:lblStatus.Left = 10
+
+$lblNote = New-Object System.Windows.Forms.Label
+$lblNote.Text = 'Shows registry-managed items only. Windows built-ins (Rotate, Cast to Device, Defender, etc.) are not shown.'
+$lblNote.ForeColor = [System.Drawing.Color]::FromArgb(90,90,90)
+$lblNote.Font = New-Object System.Drawing.Font('Segoe UI', 7.5)
+$lblNote.AutoSize = $true; $lblNote.Top = 10; $lblNote.Left = 370
+
+$statusBar.Controls.Add($script:lblStatus)
+$statusBar.Controls.Add($lblNote)
+
+# Control add order matters for docking (Fill must be added before Top/Bottom)
+$form.Controls.Add($scroll)
+$form.Controls.Add($statusBar)
 $form.Controls.Add($toolbar)
 
-# ── Populate list ──
-function populateList {
-    $script:loading = $true
-    $lv.BeginUpdate()
-    $lv.Items.Clear()
+# Events
+$script:cbContext.add_SelectedIndexChanged({ buildDisplayItems })
+$script:chkHidden.add_CheckedChanged({ buildDisplayItems })
+$btnRefresh.add_Click({ reloadAll })
+$form.add_Shown({ reloadAll })
+$scroll.add_Resize({ $script:listPanel.Width = $scroll.ClientSize.Width; $script:listPanel.Invalidate() })
 
-    $filter       = $cbFilter.SelectedItem
-    $showDisabled = $chkDisabled.Checked
-    $shown = 0; $disabled = 0
-
-    foreach ($e in $script:entries) {
-        if ($filter -ne 'All' -and $e.AppliesTo -ne $filter) { continue }
-        if (-not $showDisabled -and -not $e.Enabled) { continue }
-
-        $imgIdx = try { getIconIndex $e $script:imageList } catch { logEx $_.Exception "populateList getIconIndex $($e.VerbName)"; fallbackIndex $e }
-
-        $item = New-Object System.Windows.Forms.ListViewItem($e.Label, $imgIdx)
-        $item.Tag     = $e          # must be set before Checked (ItemCheck fires on set)
-        $item.Checked = $e.Enabled
-
-        [void]$item.SubItems.Add($e.AppliesTo)
-        [void]$item.SubItems.Add($e.Kind)
-        [void]$item.SubItems.Add($e.Source)
-        [void]$item.SubItems.Add($(if ($e.Enabled) { 'Enabled' } else { 'Disabled' }))
-        [void]$item.SubItems.Add($e.ReadPath)
-
-        if (-not $e.Enabled) { $item.ForeColor = [System.Drawing.Color]::Gray }
-
-        [void]$lv.Items.Add($item)
-        $shown++
-        if (-not $e.Enabled) { $disabled++ }
-    }
-
-    $lv.EndUpdate()
-    $script:loading = $false
-    $lblStatus.Text = "$shown shown  |  $disabled disabled  |  $($script:entries.Count) total"
-}
-
-function reloadEntries {
-    $lblStatus.Text  = 'Scanning registry...'
-    $form.Cursor     = [System.Windows.Forms.Cursors]::WaitCursor
-    $lv.Items.Clear()
-    $form.Refresh()
-    try {
-        $script:entries = getAllEntries
-        log "Scan complete: $($script:entries.Count) entries found"
-    } catch {
-        logEx $_.Exception 'getAllEntries'
-    } finally {
-        $form.Cursor = [System.Windows.Forms.Cursors]::Default
-    }
-    populateList
-}
-
-# ── Events ────────────────────────────────────────────────────────────────────
-$lv.add_ItemCheck({
-    param($s, $e)
-    if ($script:loading) { return }
-    $item  = $lv.Items[$e.Index]
-    $entry = [CmEntry]$item.Tag
-    if (-not $entry) { return }
-    $on    = ($e.NewValue -eq 'Checked')
-    applyEntry $entry $on
-    $entry.Enabled         = $on
-    $item.ForeColor        = if ($on) { [System.Drawing.SystemColors]::WindowText } else { [System.Drawing.Color]::Gray }
-    $item.SubItems[4].Text = if ($on) { 'Enabled' } else { 'Disabled' }
-    $script:pendingNotify  = $true
-})
-
-$lv.add_ItemChecked({
-    if ($script:pendingNotify) {
-        $script:pendingNotify = $false
-        notifyShell
-        $dis = ($lv.Items | Where-Object { -not $_.Checked }).Count
-        $lblStatus.Text = "$($lv.Items.Count) shown  |  $dis disabled  |  $($script:entries.Count) total"
-    }
-})
-
-$btnEnable.add_Click({
-    $changed = $false
-    foreach ($item in @($lv.SelectedItems)) {
-        $entry = [CmEntry]$item.Tag
-        if (-not $entry.Enabled) {
-            applyEntry $entry $true
-            $entry.Enabled = $true; $item.Checked = $true
-            $item.ForeColor = [System.Drawing.SystemColors]::WindowText
-            $item.SubItems[4].Text = 'Enabled'
-            $changed = $true
-        }
-    }
-    if ($changed) { notifyShell; populateList }
-})
-
-$btnDisable.add_Click({
-    $changed = $false
-    foreach ($item in @($lv.SelectedItems)) {
-        $entry = [CmEntry]$item.Tag
-        if ($entry.Enabled) {
-            applyEntry $entry $false
-            $entry.Enabled = $false; $item.Checked = $false
-            $item.ForeColor = [System.Drawing.Color]::Gray
-            $item.SubItems[4].Text = 'Disabled'
-            $changed = $true
-        }
-    }
-    if ($changed) { notifyShell; populateList }
-})
-
-$btnRefresh.add_Click({
-    $script:imgCache.Clear()
-    $script:imageList.Images.Clear()
-    $script:imageList = initImageList
-    $lv.SmallImageList = $script:imageList
-    reloadEntries
-})
-$cbFilter.add_SelectedIndexChanged({ populateList })
-$chkDisabled.add_CheckedChanged({ populateList })
-
-$form.add_Shown({ reloadEntries })
 [void]$form.ShowDialog()
