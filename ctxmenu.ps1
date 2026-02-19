@@ -12,6 +12,28 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
+# ── Logging ───────────────────────────────────────────────────────────────────
+$script:logPath = Join-Path $PSScriptRoot 'ctxmenu.log'
+function log([string]$msg) {
+    $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff')  $msg"
+    Add-Content -Path $script:logPath -Value $line -Encoding UTF8
+}
+function logEx([System.Exception]$ex, [string]$context) {
+    log "ERROR in $context`: $($ex.Message)"
+    log "  Type: $($ex.GetType().FullName)"
+    log "  Stack: $($ex.StackTrace -replace '\r?\n', ' | ')"
+    if ($ex.InnerException) { logEx $ex.InnerException "  (inner)" }
+}
+
+# Clear log on each startup so it only has the latest run
+Set-Content -Path $script:logPath -Value "ctxmenu started $(Get-Date)" -Encoding UTF8
+
+# Catch unhandled WinForms thread exceptions and log them before showing the dialog
+[System.Windows.Forms.Application]::add_ThreadException({
+    param($sender, $e)
+    logEx $e.Exception 'ThreadException'
+})
+
 Add-Type -ReferencedAssemblies 'System.Drawing' @'
 using System;
 using System.Drawing;
@@ -338,6 +360,7 @@ function fallbackIndex([CmEntry]$e) {
 }
 
 function getIconIndex([CmEntry]$entry, [System.Windows.Forms.ImageList]$il) {
+    log "getIconIndex: $($entry.VerbName) kind=$($entry.Kind) path=$($entry.ReadPath)"
     # 1. Try Icon value on the verb key
     $iconSpec = $null
     $vk = rOpen $entry.ReadPath
@@ -400,7 +423,9 @@ function getIconIndex([CmEntry]$entry, [System.Windows.Forms.ImageList]$il) {
             $script:imgCache[$cacheKey] = $imgIdx
             return $imgIdx
         }
-    } catch { }
+    } catch {
+        logEx $_.Exception "getIconIndex spec=[$iconSpec]"
+    }
 
     $script:imgCache[$cacheKey] = fallbackIndex $entry
     return fallbackIndex $entry
@@ -532,7 +557,7 @@ function populateList {
         if ($filter -ne 'All' -and $e.AppliesTo -ne $filter) { continue }
         if (-not $showDisabled -and -not $e.Enabled) { continue }
 
-        $imgIdx = getIconIndex $e $script:imageList
+        $imgIdx = try { getIconIndex $e $script:imageList } catch { logEx $_.Exception "populateList getIconIndex $($e.VerbName)"; fallbackIndex $e }
 
         $item = New-Object System.Windows.Forms.ListViewItem($e.Label, $imgIdx)
         $item.Tag     = $e          # must be set before Checked (ItemCheck fires on set)
@@ -561,8 +586,14 @@ function reloadEntries {
     $form.Cursor     = [System.Windows.Forms.Cursors]::WaitCursor
     $lv.Items.Clear()
     $form.Refresh()
-    try   { $script:entries = getAllEntries }
-    finally { $form.Cursor = [System.Windows.Forms.Cursors]::Default }
+    try {
+        $script:entries = getAllEntries
+        log "Scan complete: $($script:entries.Count) entries found"
+    } catch {
+        logEx $_.Exception 'getAllEntries'
+    } finally {
+        $form.Cursor = [System.Windows.Forms.Cursors]::Default
+    }
     populateList
 }
 
