@@ -341,14 +341,13 @@ function initImageList {
     )) {
         $p = Join-Path $root $rel
         try {
-            if (Test-Path $p) {
-                $bmp = [System.Drawing.Bitmap]::new($p)
-                $il.Images.Add($bmp)
-                $bmp.Dispose()
-            } else {
-                $il.Images.Add([System.Drawing.Bitmap]::new(16,16))
-            }
-        } catch { $il.Images.Add([System.Drawing.Bitmap]::new(16,16)) }
+            # Do NOT dispose bitmaps here - ImageList stores a reference (not a copy)
+            # until its GDI handle is lazily created on first display. Disposing
+            # early causes "Parameter is not valid" in ImageList.CreateHandle().
+            $bmp = if (Test-Path $p) { [System.Drawing.Bitmap]::new($p) } `
+                   else               { [System.Drawing.Bitmap]::new(16, 16) }
+            $il.Images.Add($bmp)
+        } catch { $il.Images.Add([System.Drawing.Bitmap]::new(16, 16)) }
     }
     return $il
 }
@@ -360,7 +359,6 @@ function fallbackIndex([CmEntry]$e) {
 }
 
 function getIconIndex([CmEntry]$entry, [System.Windows.Forms.ImageList]$il) {
-    log "getIconIndex: $($entry.VerbName) kind=$($entry.Kind) path=$($entry.ReadPath)"
     # 1. Try Icon value on the verb key
     $iconSpec = $null
     $vk = rOpen $entry.ReadPath
