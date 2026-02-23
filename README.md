@@ -1,3 +1,5 @@
+![alt text](docs/ss1.png)
+
 # ctxmenu
 
 A GUI for managing Windows Explorer context menu entries. Shows shell verbs
