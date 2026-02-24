@@ -363,8 +363,8 @@ $script:imgCache = [System.Collections.Generic.Dictionary[string,System.Drawing.
 
 function getFallback([CmEntry]$e) {
     $rel = switch ($e.Kind) {
-        'ShellEx'  { '..\taskmon\icons\cog.png' }
-        'Submenu'  { '..\taskmon\icons\bullet_go.png' }
+        'ShellEx'  { '..\task-stats\icons\cog.png' }
+        'Submenu'  { '..\task-stats\icons\bullet_go.png' }
         default    { '..\transcribe\icons\wrench.png' }
     }
     $p = Join-Path $PSScriptRoot $rel
@@ -544,7 +544,7 @@ $form.StartPosition = 'CenterScreen'
 $form.Font          = New-Object System.Drawing.Font('Segoe UI', 9)
 $form.BackColor     = $C_BG
 
-$iconPath = Join-Path $PSScriptRoot '..\taskmon\icons\application_view_list.png'
+$iconPath = Join-Path $PSScriptRoot '..\task-stats\icons\application_view_list.png'
 if (Test-Path $iconPath) { try { $form.Icon = pngToIcon $iconPath } catch { } }
 
 # Toolbar
