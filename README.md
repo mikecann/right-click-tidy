@@ -6,6 +6,12 @@ A GUI for managing Windows Explorer context menu entries. Shows shell verbs
 and COM extension handlers from the registry, and lets you toggle them on or
 off without needing admin rights.
 
+
+## Screenshots
+
+![ctxmenu screenshot](docs/ss1.png)
+
+
 ## Usage
 
 ```
