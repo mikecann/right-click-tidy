@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse every PowerShell script
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors)
+            if ($errors.Count) {
+              $errors | ForEach-Object { Write-Host "${_}" }
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
+      - name: Test launcher and icon helpers
+        shell: powershell
+        run: .\test-install-lib.ps1
+      - name: Test isolated install and uninstall
+        shell: powershell
+        run: .\test-install.ps1
+      - name: Test registry scanning and reversible toggles
+        shell: powershell
+        run: .\run-tests.ps1

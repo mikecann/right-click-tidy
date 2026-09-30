@@ -3,18 +3,18 @@ param()
 $ErrorActionPreference = 'Stop'
 
 $scriptDir = Split-Path $MyInvocation.MyCommand.Path
-$mainScript = Join-Path $scriptDir 'ctxmenu.ps1'
+$mainScript = Join-Path $scriptDir 'right-click-tidy.ps1'
 $src = Get-Content $mainScript -Raw
 $cutAt = $src.IndexOf('function pngToIcon')
-if ($cutAt -lt 0) { throw 'Could not find ctxmenu.ps1 function/UI boundary.' }
+if ($cutAt -lt 0) { throw 'Could not find right-click-tidy.ps1 function/UI boundary.' }
 Invoke-Expression $src.Substring(0, $cutAt)
 
 function Assert-True([bool]$condition, [string]$message) {
     if (-not $condition) { throw $message }
 }
 
-$testAppSubKey = 'Software\Classes\Applications\CodexCtxMenuTest.exe'
-$testShellExSubKey = 'Software\Classes\*\shellex\ContextMenuHandlers\CodexCtxMenuShellExTest'
+$testAppSubKey = 'Software\Classes\Applications\CodexRightClickTidyTest.exe'
+$testShellExSubKey = 'Software\Classes\*\shellex\ContextMenuHandlers\CodexRightClickTidyShellExTest'
 $testShellExClsId = '{11111111-2222-3333-4444-555555555555}'
 $blockedSubKey = 'Software\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked'
 $hkcu = [Microsoft.Win32.Registry]::CurrentUser
@@ -37,12 +37,12 @@ try {
     $cmdKey.Close()
 
     $entries = @(scanOpenWithApplications)
-    $entry = $entries | Where-Object { $_.VerbName -eq 'OpenWith:CodexCtxMenuTest.exe' } | Select-Object -First 1
+    $entry = $entries | Where-Object { $_.VerbName -eq 'OpenWith:CodexRightClickTidyTest.exe' } | Select-Object -First 1
 
     Assert-True ($null -ne $entry) 'Expected test Open With app to be scanned.'
     Assert-True ($entry.Kind -eq 'OpenWith') 'Expected OpenWith kind.'
     Assert-True ($entry.AppliesTo -eq 'All Files') 'Expected Open With app to apply to All Files.'
-    Assert-True ($entry.Label -eq 'Open with CodexCtxMenuTest') "Unexpected label: $($entry.Label)"
+    Assert-True ($entry.Label -eq 'Open with CodexRightClickTidyTest') "Unexpected label: $($entry.Label)"
     Assert-True ($entry.Enabled) 'Expected test Open With app to start enabled.'
 
     applyEntry $entry $false
@@ -51,7 +51,7 @@ try {
     $appKey.Close()
 
     $disabledEntry = @(scanOpenWithApplications) |
-        Where-Object { $_.VerbName -eq 'OpenWith:CodexCtxMenuTest.exe' } |
+        Where-Object { $_.VerbName -eq 'OpenWith:CodexRightClickTidyTest.exe' } |
         Select-Object -First 1
     Assert-True (-not $disabledEntry.Enabled) 'Expected scanner to see NoOpenWith as disabled.'
 
@@ -65,7 +65,7 @@ try {
     $shellExKey.Close()
 
     $shellExEntry = @(scanShellEx 'HKCU' 'Software\Classes\*\shellex\ContextMenuHandlers' 'All Files') |
-        Where-Object { $_.VerbName -eq 'CodexCtxMenuShellExTest' } |
+        Where-Object { $_.VerbName -eq 'CodexRightClickTidyShellExTest' } |
         Select-Object -First 1
     Assert-True ($null -ne $shellExEntry) 'Expected test ShellEx handler to be scanned.'
     Assert-True ($shellExEntry.Enabled) 'Expected test ShellEx handler to start enabled.'
@@ -77,7 +77,7 @@ try {
     $blockedKey.Close()
 
     $disabledShellExEntry = @(scanShellEx 'HKCU' 'Software\Classes\*\shellex\ContextMenuHandlers' 'All Files') |
-        Where-Object { $_.VerbName -eq 'CodexCtxMenuShellExTest' } |
+        Where-Object { $_.VerbName -eq 'CodexRightClickTidyShellExTest' } |
         Select-Object -First 1
     Assert-True (-not $disabledShellExEntry.Enabled) 'Expected scanner to see blocked ShellEx CLSID as disabled.'
 
@@ -91,7 +91,7 @@ try {
     $shellExKey.Close()
 
     $migratedShellExEntry = @(scanShellEx 'HKCU' 'Software\Classes\*\shellex\ContextMenuHandlers' 'All Files') |
-        Where-Object { $_.VerbName -eq 'CodexCtxMenuShellExTest' } |
+        Where-Object { $_.VerbName -eq 'CodexRightClickTidyShellExTest' } |
         Select-Object -First 1
     Assert-True (-not $migratedShellExEntry.Enabled) 'Expected legacy negative ShellEx marker to remain disabled.'
 
@@ -99,8 +99,8 @@ try {
     Assert-True ($blockedKey.GetValueNames() -icontains $testShellExClsId) 'Expected legacy negative ShellEx marker to be migrated to Blocked.'
     $blockedKey.Close()
 
-    Write-Host '[PASS] ctxmenu Open With application tests' -ForegroundColor Green
-    Write-Host '[PASS] ctxmenu ShellEx blocked CLSID tests' -ForegroundColor Green
+    Write-Host '[PASS] right-click-tidy Open With application tests' -ForegroundColor Green
+    Write-Host '[PASS] right-click-tidy ShellEx blocked CLSID tests' -ForegroundColor Green
 } finally {
     try { $hkcu.DeleteSubKeyTree($testAppSubKey) } catch { }
     try { $hkcu.DeleteSubKeyTree($testShellExSubKey) } catch { }

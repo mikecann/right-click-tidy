@@ -1,5 +1,5 @@
 # test-compare.ps1
-# Compares what ctxmenu.ps1 shows for a context against the ACTUAL
+# Compares what right-click-tidy.ps1 shows for a context against the ACTUAL
 # context menu items Windows would show for a real file.
 #
 # Usage:
@@ -7,7 +7,7 @@
 #   powershell -ExecutionPolicy Bypass -File test-compare.ps1 -ContextType Folders
 #
 # For file contexts it invokes the shell IContextMenu COM interface to get
-# the real item list, then diffs it against what ctxmenu reports.
+# the real item list, then diffs it against what right-click-tidy reports.
 
 param(
     [string]$TestFile  = '',           # path to an actual file/folder to test against
@@ -17,18 +17,15 @@ param(
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-# ── Pull in the same scan logic from ctxmenu.ps1 ─────────────────────────────
+# ── Pull in the same scan logic from right-click-tidy.ps1 ─────────────────────────────
 $scriptDir = Split-Path $MyInvocation.MyCommand.Path
-$mainScript = Join-Path $scriptDir 'ctxmenu.ps1'
+$mainScript = Join-Path $scriptDir 'right-click-tidy.ps1'
 
-# We dot-source ctxmenu.ps1 but skip the UI parts by stubbing ShowDialog.
-# Easier: just re-use the individual scan functions by loading the file up to the UI section.
+# Load the scan functions without opening the GUI.
 $src = Get-Content $mainScript -Raw
-# Stop before the UI setup (after all function definitions)
-$cutAt = $src.IndexOf('# ── Form icon ──')
-if ($cutAt -lt 0) { $cutAt = $src.IndexOf('$script:entries') }
-$functionsOnly = $src.Substring(0, $cutAt)
-Invoke-Expression $functionsOnly
+$cutAt = $src.IndexOf('function pngToIcon')
+if ($cutAt -lt 0) { throw 'Could not find right-click-tidy.ps1 function/UI boundary.' }
+Invoke-Expression $src.Substring(0, $cutAt)
 
 # ── Get real context menu items via IContextMenu COM ─────────────────────────
 Add-Type @'
@@ -37,7 +34,7 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 
-public class ShellCtxMenu {
+public class ShellContextMenu {
     [DllImport("shell32.dll", CharSet=CharSet.Auto)]
     static extern IntPtr ILCreateFromPath(string pszPath);
     [DllImport("shell32.dll")]
@@ -117,14 +114,14 @@ public class ShellCtxMenu {
 
             // Get IContextMenu
             var ctxGuid = new Guid("000214e4-0000-0000-c000-000000000046");
-            IntPtr pCtxMenu;
+            IntPtr pContextMenu;
             var pidls = new IntPtr[] { pidlChild };
-            desktop.GetUIObjectOf(IntPtr.Zero, 1, pidls, ref ctxGuid, IntPtr.Zero, out pCtxMenu);
-            if (pCtxMenu == IntPtr.Zero) { ILFree(pidlFull); return result; }
+            desktop.GetUIObjectOf(IntPtr.Zero, 1, pidls, ref ctxGuid, IntPtr.Zero, out pContextMenu);
+            if (pContextMenu == IntPtr.Zero) { ILFree(pidlFull); return result; }
 
-            var ctxMenu = (IContextMenu)Marshal.GetObjectForIUnknown(pCtxMenu);
+            var contextMenu = (IContextMenu)Marshal.GetObjectForIUnknown(pContextMenu);
             IntPtr hMenu = CreatePopupMenu();
-            ctxMenu.QueryContextMenu(hMenu, 0, 1, 0x7FFF, 0x100); // CMF_EXPLORE
+            contextMenu.QueryContextMenu(hMenu, 0, 1, 0x7FFF, 0x100); // CMF_EXPLORE
 
             int count = GetMenuItemCount(hMenu);
             for (int i = 0; i < count; i++) {
@@ -142,7 +139,7 @@ public class ShellCtxMenu {
                 }
             }
             DestroyMenu(hMenu);
-            Marshal.ReleaseComObject(ctxMenu);
+            Marshal.ReleaseComObject(contextMenu);
             ILFree(pidlFull);
         } catch (Exception ex) {
             result.Add("ERROR: " + ex.Message);
@@ -152,7 +149,7 @@ public class ShellCtxMenu {
 }
 '@ -ErrorAction SilentlyContinue
 
-# ── Run the scan (re-use getAllEntries from ctxmenu.ps1) ─────────────────────
+# ── Run the scan (re-use getAllEntries from right-click-tidy.ps1) ─────────────────────
 Write-Host "Scanning registry..." -ForegroundColor Cyan
 $allEntries = getAllEntries
 
@@ -189,9 +186,9 @@ $registeredItems = @($deduped.Values | Sort-Object Label)
 
 # ── Get REAL context menu if a file path was given ────────────────────────────
 $realItems = @()
-if ($TestFile -and (Test-Path $TestFile) -and ([System.Management.Automation.PSTypeName]'ShellCtxMenu').Type) {
+if ($TestFile -and (Test-Path $TestFile) -and ([System.Management.Automation.PSTypeName]'ShellContextMenu').Type) {
     Write-Host "Querying real context menu from shell..." -ForegroundColor Cyan
-    $realItems = [ShellCtxMenu]::GetItems($TestFile)
+    $realItems = [ShellContextMenu]::GetItems($TestFile)
     if ($realItems[0] -like 'ERROR:*') {
         Write-Host "Shell query failed: $($realItems[0])" -ForegroundColor Yellow
         $realItems = @()
@@ -203,14 +200,14 @@ $outLines = [System.Text.StringBuilder]::new()
 function L([string]$s) { [void]$outLines.AppendLine($s); Write-Host $s }
 
 L "========================================================"
-L "  Context Menu Manager - Comparison Test"
+L "  Right Click Tidy - Comparison Test"
 L "  Context: $ContextType"
 if ($TestFile) { L "  File:    $TestFile" }
 L "  Date:    $(Get-Date)"
 L "========================================================"
 L ""
 
-L "REGISTERED ITEMS ($($registeredItems.Count) total - what ctxmenu.ps1 can manage):"
+L "REGISTERED ITEMS ($($registeredItems.Count) total - what right-click-tidy.ps1 can manage):"
 L "--------------------------------------------------------"
 foreach ($e in $registeredItems) {
     $state  = if ($e.Enabled) { '[ON ]' } else { '[OFF]' }

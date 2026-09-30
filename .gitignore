@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.log
+*.exe
+*.dll
+bin/
+obj/
+build/
+dist/
+icons/*.ico
+diag-*.txt
+test-compare-*.txt

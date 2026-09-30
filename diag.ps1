@@ -1,4 +1,4 @@
-# ctxmenu-diag.ps1
+# right-click-tidy-diag.ps1
 # Dumps every registry location that contributes to the context menu for a given extension.
 # Run:  powershell -ExecutionPolicy Bypass -File diag.ps1 -Ext .mp4
 # Output is written to diag-<ext>.txt next to this script.

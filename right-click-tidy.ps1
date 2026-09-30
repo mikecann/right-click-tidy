@@ -1,11 +1,11 @@
-# ctxmenu.ps1  –  Context Menu Manager
+# right-click-tidy.ps1  -  Right Click Tidy
 #
 # Renders a visual preview of your context menu (dark theme, icons, submenu arrows)
 # and lets you click items to hide/show them in Windows Explorer.
 #
 # All writes go to HKCU, so no admin rights needed.
 #   Static verbs:  LegacyDisable value in HKCU shadow key
-#   COM handlers:  prefix CLSID with '-' in HKCU shadow key
+#   COM handlers:  block CLSID under HKCU Shell Extensions\Blocked
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -510,10 +510,10 @@ $script:imgCache = [System.Collections.Generic.Dictionary[string,System.Drawing.
 
 function getFallback([CmEntry]$e) {
     $rel = switch ($e.Kind) {
-        'ShellEx'  { '..\task-stats\icons\cog.png' }
-        'Submenu'  { '..\task-stats\icons\bullet_go.png' }
+        'ShellEx'  { 'icons\cog.png' }
+        'Submenu'  { 'icons\bullet_go.png' }
         'OpenWith' { 'icons\application_form.png' }
-        default    { '..\transcribe\icons\wrench.png' }
+        default    { 'icons\wrench.png' }
     }
     $p = Join-Path $PSScriptRoot $rel
     try { if (Test-Path $p) { return [System.Drawing.Bitmap]::new($p) } } catch { }
@@ -694,14 +694,14 @@ $script:displayItems = [System.Collections.Generic.List[CmEntry]]::new()
 $script:hoveredIdx   = -1
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text          = 'Context Menu Manager'
+$form.Text          = 'Right Click Tidy'
 $form.Size          = New-Object System.Drawing.Size(520, 680)
 $form.MinimumSize   = New-Object System.Drawing.Size(380, 360)
 $form.StartPosition = 'CenterScreen'
 $form.Font          = New-Object System.Drawing.Font('Segoe UI', 9)
 $form.BackColor     = $C_BG
 
-$iconPath = Join-Path $PSScriptRoot '..\task-stats\icons\application_view_list.png'
+$iconPath = Join-Path $PSScriptRoot 'icons\right-click-tidy.png'
 if (Test-Path $iconPath) { try { $form.Icon = pngToIcon $iconPath } catch { } }
 
 # Toolbar
